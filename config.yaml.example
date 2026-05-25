@@ -54,3 +54,6 @@ system_prompt:
 
 input: "input/novel.txt"
 output: "output/novel_ko.txt"
+# log_dir: "output/logs"              # 로그 파일 저장 디렉터리 (기본값: output 폴더 하위 logs/)
+# log_level: "INFO"                   # 로그 레벨: DEBUG | INFO | WARNING | ERROR (기본값: INFO)
+# log_translation_step: 100           # 번역 줄 INFO 로그 주기 (기본값: 100, 오류는 항상 기록)

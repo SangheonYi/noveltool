@@ -33,6 +33,7 @@ config.yaml
 .cache/
 input/
 output/
+logs/
 recovered.txt
 
 # OS

@@ -69,6 +69,17 @@ class Config:
     system_prompt: SystemPromptConfig
     input: str
     output: str
+    log_dir: str
+    log_level: str
+    log_translation_step: int
+
+
+def _resolve_log_dir(log_dir: str | None, output: str) -> str:
+    if log_dir:
+        return log_dir
+    if output:
+        return os.path.join(os.path.dirname(os.path.abspath(output)), 'logs')
+    return 'logs'
 
 
 def _fetch_first_model(base_url: str, api_key: str) -> str:
@@ -147,4 +158,7 @@ def load_config(path: str) -> Config:
         ),
         input=raw.get('input', ''),
         output=raw.get('output', ''),
+        log_dir=_resolve_log_dir(raw.get('log_dir'), raw.get('output', '')),
+        log_level=str(raw.get('log_level', 'INFO')).upper(),
+        log_translation_step=int(raw.get('log_translation_step', 100)),
     )

@@ -2,11 +2,12 @@ import json
 import re
 import time
 from dataclasses import dataclass
-from urllib.parse import quote_plus, unquote, urlparse, parse_qs
+from urllib.parse import quote_plus, unquote
 
 import requests
 from bs4 import BeautifulSoup
 
+from .. import logger
 from .identifier import WorkCandidate
 
 
@@ -19,18 +20,14 @@ class VerifiedWork:
 
 def _extract_namuwiki_title(href: str) -> str | None:
     """DDG redirect href에서 namu.wiki 문서명 추출."""
-    # //duckduckgo.com/l/?uddg=https%3A%2F%2Fnamu.wiki%2Fw%2F{title}&rut=...
     match = re.search(r'uddg=([^&]+)', href)
     if not match:
         return None
     decoded = unquote(match.group(1))
     if 'namu.wiki/w/' not in decoded:
         return None
-    path = decoded.split('namu.wiki/w/', 1)[1]
-    # ?from=... 파라미터 제거
-    path = path.split('?')[0]
+    path = decoded.split('namu.wiki/w/', 1)[1].split('?')[0]
     title = unquote(path).replace('+', ' ')
-    # 분류: 접두어 제외
     if title.startswith('분류:'):
         return None
     return title
@@ -38,8 +35,10 @@ def _extract_namuwiki_title(href: str) -> str | None:
 
 def _duckduckgo_search(query: str, result_count: int) -> tuple[list[str], list[str]]:
     """DuckDuckGo Lite 검색. (snippets, namu_articles) 반환."""
+    log = logger.get()
     snippets: list[str] = []
     namu_articles: list[str] = []
+    log.debug('[검색] DuckDuckGo 쿼리: %s', query)
     try:
         url = f'https://lite.duckduckgo.com/lite/?q={quote_plus(query)}&kl=kr-kr'
         headers = {
@@ -55,13 +54,11 @@ def _duckduckgo_search(query: str, result_count: int) -> tuple[list[str], list[s
 
         soup = BeautifulSoup(resp.text, 'html.parser')
 
-        # 나무위키 링크 추출
         for a in soup.find_all('a', href=True):
             title = _extract_namuwiki_title(a['href'])
             if title and title not in namu_articles:
                 namu_articles.append(title)
 
-        # 스니펫 수집
         for td in soup.select('td.result-snippet'):
             text = td.get_text(strip=True)
             if text and text not in snippets:
@@ -77,14 +74,23 @@ def _duckduckgo_search(query: str, result_count: int) -> tuple[list[str], list[s
                 if len(snippets) >= result_count:
                     break
 
+        log.info('[검색] DDG 결과: 스니펫 %d개, 나무위키 링크 %d개', len(snippets), len(namu_articles))
+        if snippets:
+            log.debug('[검색] 스니펫:\n%s', '\n'.join(f'  - {s}' for s in snippets))
+        if namu_articles:
+            log.debug('[검색] 나무위키 링크:\n%s', '\n'.join(f'  - {a}' for a in namu_articles))
+
     except Exception as e:
+        log.error('[검색] DuckDuckGo 실패 (%s): %s', query, e)
         print(f'[경고] DuckDuckGo 검색 실패 ({query}): {e}')
     return snippets[:result_count], namu_articles
 
 
 def _playwright_google_search(query: str, headless: bool, result_count: int, debug_dir: str = '.cache') -> tuple[list[str], list[str]]:
     """Playwright 기반 Google 검색 fallback."""
+    log = logger.get()
     snippets: list[str] = []
+    log.debug('[검색] Google(Playwright) 쿼리: %s', query)
     try:
         from playwright.sync_api import sync_playwright
 
@@ -120,10 +126,15 @@ def _playwright_google_search(query: str, headless: bool, result_count: int, deb
                 os.makedirs(debug_dir, exist_ok=True)
                 screenshot_path = os.path.join(debug_dir, 'google_debug.png')
                 page.screenshot(path=screenshot_path, full_page=False)
+                log.warning('[검색] Google 결과 없음 (봇 차단 의심) → 스크린샷: %s', screenshot_path)
                 print(f'[디버그] 구글 결과 없음 → 스크린샷: {screenshot_path}')
+            else:
+                log.info('[검색] Google 결과: 스니펫 %d개', len(snippets))
+                log.debug('[검색] 스니펫:\n%s', '\n'.join(f'  - {s}' for s in snippets))
 
             browser.close()
     except Exception as e:
+        log.error('[검색] Google(Playwright) 실패 (%s): %s', query, e)
         print(f'[경고] 구글 검색 실패 ({query}): {e}')
     return snippets[:result_count], []
 
@@ -138,7 +149,6 @@ def _best_namuwiki_article(articles: list[str]) -> str | None:
     """등장인물 하위 문서를 우선 선택, 없으면 첫 번째 반환."""
     for a in articles:
         if '/등장인물' in a:
-            # 등장인물 서브페이지 → 부모 문서명 반환 (fetch_characters가 /등장인물 시도)
             return a.split('/등장인물')[0]
     return articles[0] if articles else None
 
@@ -151,16 +161,20 @@ def _verify_single(
     result_count: int,
     debug_dir: str = '.cache',
 ) -> 'VerifiedWork | None':
+    log = logger.get()
     query = f'{candidate.work} 등장인물 나무위키'
     snippets, namu_articles = _search(query, engine, headless, result_count, debug_dir)
 
     if not snippets and not namu_articles:
+        log.warning('[검증] \'%s\' 검색 결과 없음 — 검증 실패', candidate.work)
         print(f'[전처리] \'{candidate.work}\' 검색 결과 없음 — 검증 실패')
         return None
 
     # DDG에서 나무위키 링크를 직접 찾은 경우 LLM 검증 생략
     if namu_articles:
         namuwiki_article = _best_namuwiki_article(namu_articles)
+        log.info('[검증] \'%s\' 나무위키 문서 발견 (LLM 검증 생략) → %s', candidate.work, namuwiki_article)
+        log.debug('[검증] 발견된 나무위키 문서 목록: %s', namu_articles)
         print(f'[전처리] \'{candidate.work}\' 검색에서 나무위키 문서 발견 → {namuwiki_article}')
         return VerifiedWork(
             work=candidate.work,
@@ -185,20 +199,25 @@ def _verify_single(
             ),
         }
     ]
+    log.debug('[검증] LLM 검증 프롬프트:\n%s', messages[0]['content'])
 
     try:
         response = llm_client.chat(messages, temperature=0)
+        log.debug('[검증] LLM 응답:\n%s', response)
         start = response.find('{')
         end = response.rfind('}') + 1
         if start == -1 or end == 0:
+            log.warning('[검증] \'%s\' LLM 응답 JSON 파싱 실패', candidate.work)
             return None
         data = json.loads(response[start:end])
 
         if not data.get('verified', False):
+            log.info('[검증] \'%s\' 검증 실패: %s', candidate.work, data.get('reason', ''))
             print(f'[전처리] \'{candidate.work}\' 검증 실패: {data.get("reason", "")}')
             return None
 
         namuwiki_article = data.get('namuwiki_article') or candidate.work
+        log.info('[검증] \'%s\' 검증 성공 → 나무위키: %s', candidate.work, namuwiki_article)
         print(f'[전처리] \'{candidate.work}\' 검증 성공 → 나무위키: {namuwiki_article}')
         return VerifiedWork(
             work=candidate.work,
@@ -206,6 +225,7 @@ def _verify_single(
             namuwiki_article=namuwiki_article,
         )
     except Exception as e:
+        log.error('[검증] \'%s\' LLM 검증 실패: %s', candidate.work, e)
         print(f'[경고] \'{candidate.work}\' LLM 검증 실패: {e}')
         return None
 
@@ -218,12 +238,16 @@ def verify_works(
     result_count: int = 5,
     debug_dir: str = '.cache',
 ) -> list[VerifiedWork]:
+    log = logger.get()
+    log.info('[검증] %d개 후보 검증 시작 (엔진: %s)', len(candidates), engine)
     verified: list[VerifiedWork] = []
     for candidate in candidates:
         if candidate.confidence < 0.4:
+            log.info('[검증] \'%s\' confidence %.2f → 검색 스킵', candidate.work, candidate.confidence)
             print(f'[전처리] \'{candidate.work}\' confidence {candidate.confidence:.2f} — 검색 스킵')
             continue
         result = _verify_single(llm_client, candidate, engine, headless, result_count, debug_dir)
         if result:
             verified.append(result)
+    log.info('[검증] 완료: %d/%d 검증 성공', len(verified), len(candidates))
     return verified

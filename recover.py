@@ -65,6 +65,10 @@ def main() -> None:
         print(f'  요약 제공     : {"있음" if summary else "없음"}')
         return
 
+    from noveltool import logger
+    log_path = logger.setup(config.log_dir, config.log_level)
+    print(f'[로그] {log_path}')
+
     from noveltool.recover_pipeline import run
     run(
         config=config,

@@ -54,6 +54,10 @@ def main() -> None:
         print(f'  최대 라인 수 : {config.translation.max_lines if config.translation.max_lines else "전체"}')
         return
 
+    from noveltool import logger
+    log_path = logger.setup(config.log_dir, config.log_level)
+    print(f'[로그] {log_path}')
+
     from noveltool.pipeline import run
     run(config, preprocess_only=args.preprocess_only, no_cache=args.no_cache)
 
