@@ -2,6 +2,7 @@ import os
 import re
 import sys
 import yaml
+import requests
 from dataclasses import dataclass
 
 
@@ -69,6 +70,24 @@ class Config:
     output: str
 
 
+def _fetch_first_model(base_url: str, api_key: str) -> str:
+    url = base_url.rstrip('/') + '/models'
+    try:
+        resp = requests.get(
+            url,
+            headers={'Authorization': f'Bearer {api_key}'},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        model = data['data'][0]['id']
+        print(f'[설정] llm.model 미설정 → API에서 첫 번째 모델 사용: {model}')
+        return model
+    except Exception as e:
+        print(f'오류: llm.model 이 설정되지 않았고 모델 목록 조회도 실패했습니다: {e}', file=sys.stderr)
+        sys.exit(1)
+
+
 def load_config(path: str) -> Config:
     try:
         with open(path, encoding='utf-8') as f:
@@ -80,10 +99,12 @@ def load_config(path: str) -> Config:
     raw = _expand_env(raw)
 
     llm_raw = raw.get('llm', {})
-    for key in ('base_url', 'api_key', 'model'):
+    for key in ('base_url', 'api_key'):
         if not llm_raw.get(key):
             print(f"오류: llm.{key} 가 설정 파일에 없습니다.", file=sys.stderr)
             sys.exit(1)
+
+    model = llm_raw.get('model') or _fetch_first_model(llm_raw['base_url'], llm_raw['api_key'])
 
     translation_raw = raw.get('translation', {})
     recovery_raw = raw.get('recovery', {})
@@ -95,7 +116,7 @@ def load_config(path: str) -> Config:
         llm=LLMConfig(
             base_url=llm_raw['base_url'],
             api_key=llm_raw['api_key'],
-            model=llm_raw['model'],
+            model=model,
             temperature=float(llm_raw.get('temperature', 0.3)),
             max_completion_tokens=int(llm_raw.get('max_completion_tokens', 4096)),
         ),
