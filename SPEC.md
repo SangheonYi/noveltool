@@ -10,22 +10,23 @@ LLM 기반 웹소설 처리 도구. **번역(translate)**과 **데이터 복구(
 noveltool/
 ├── translate.py               # 번역 CLI 진입점
 ├── recover.py                 # 복구 CLI 진입점
-├── config.yaml.example
+├── config.yaml.example        # 전체 설정 옵션 + 주석
 ├── noveltool/
 │   ├── __init__.py
-│   ├── config.py              # 설정 로드 및 환경변수 치환
-│   ├── llm_client.py          # OpenAI API 래퍼 (retry 포함)
-│   ├── history.py             # history 윈도우 관리
+│   ├── config.py              # 설정 로드, 환경변수 치환, 필수값 검증
+│   ├── logger.py              # 파일 로거 초기화 + stdout TeeStream (콘솔→로그 미러링)
+│   ├── llm_client.py          # OpenAI ChatCompletion 래퍼 (exponential backoff retry)
+│   ├── history.py             # HistoryManager — history 윈도우, 요약 트리거
 │   ├── summarizer.py          # 롤링 요약 생성
-│   ├── prompt.py              # system prompt 빌더
+│   ├── prompt.py              # system prompt 빌더, 캐릭터 섹션/요약 삽입
 │   ├── pipeline.py            # 번역 파이프라인
 │   ├── recover_pipeline.py    # 복구 파이프라인
 │   └── preprocessor/
 │       ├── __init__.py
-│       ├── extractor.py       # tiktoken 청크 분할 + 병렬 캐릭터 추출
-│       ├── identifier.py      # LLM 원작 세계관 추론
-│       ├── verifier.py        # Playwright 구글 검색 + LLM 검증
-│       └── namuwiki.py        # 나무위키 크롤링 + JSON 캐시
+│       ├── extractor.py       # tiktoken 청크 분할 + 병렬 캐릭터 이름 추출
+│       ├── identifier.py      # LLM 원작 세계관 추론 (catch-all 후보 필터링)
+│       ├── verifier.py        # DuckDuckGo 검색 + 나무위키 URL 직접 추출 + LLM 검증
+│       └── namuwiki.py        # 나무위키 LLM 프로필 추출 (3단계 병렬)
 └── output/
 ```
 
@@ -37,12 +38,13 @@ noveltool/
 
 | 모듈 | 역할 |
 |------|------|
-| `config.py` | 설정 로드, 환경변수 치환, 필수값 검증 |
+| `config.py` | 설정 로드, 환경변수 치환, 필수값 검증, 미설정 모델 자동 감지 |
+| `logger.py` | 파일 핸들러 초기화 + `_TeeStream`으로 sys.stdout 래핑 |
 | `llm_client.py` | OpenAI ChatCompletion 래퍼, exponential backoff retry |
 | `history.py` | HistoryManager — history 윈도우, 요약 트리거 |
 | `summarizer.py` | 롤링 요약 생성 |
 | `prompt.py` | system prompt 빌더, 캐릭터 섹션/요약 삽입 |
-| `preprocessor/` | 캐릭터 추출 → 세계관 추론 → 검증 → 나무위키 크롤링 |
+| `preprocessor/` | 캐릭터 추출 → 세계관 추론 → 검증 → 나무위키 프로필 |
 
 ---
 
@@ -51,72 +53,80 @@ noveltool/
 ```yaml
 llm:
   base_url: "https://api.openai.com/v1"
-  api_key: "${OPENAI_API_KEY}"
-  model: "gpt-4o"
+  api_key: "${OPENAI_API_KEY}"        # 환경변수 또는 직접 입력
+  model: "gpt-4o"                     # 미설정 시 /models API 첫 번째 모델 자동 사용
   temperature: 0.3
   max_completion_tokens: 4096
 
 translation:
-  history_window: 20          # n: 번역 history 최대 턴 수
-  summary_overlap: 0.5        # 요약 후 재사용할 history 비율
+  history_window: 20                  # 번역 history 최대 턴 수. 초과 시 롤링 요약
+  summary_overlap: 0.5                # 요약 후 재사용할 history 비율
+  source_language: auto               # auto | zh | ja | en
+  target_language: ko
+  # max_lines: 200                    # 테스트용: N줄만 번역 (미설정 시 전체)
 
 recovery:
-  before_lines: 20            # n: 소실 전 context로 사용할 최대 라인 수
-  after_lines: 10             # m: 소실 후 forward reference로 사용할 최대 라인 수
+  before_lines: 20                    # 소실 전 context로 사용할 최대 라인 수
+  after_lines: 10                     # 소실 후 forward reference로 사용할 최대 라인 수
 
 preprocessing:
-  chunk_tokens: 6000
-  cache_dir: ".cache"
+  chunk_tokens: 6000                  # 캐릭터 추출 청크 최대 토큰 수 (tiktoken 기준)
+  cache_dir: ".cache"                 # 전처리 캐시 디렉터리
+                                      # _verified_works.json: 작품 확정 결과 캐시
+                                      # {article}_characters.json: 나무위키 캐릭터 프로필 캐시
 
 search:
-  engine: playwright
-  headless: true
-  result_count: 5
+  engine: duckduckgo                  # duckduckgo (requests 기반, 기본값)
+                                      # playwright (헤드리스 Chrome, Google — 봇 차단 가능)
+  headless: true                      # playwright 전용. false 시 브라우저 창 표시
+  result_count: 5                     # 수집할 검색 결과 수
 
 system_prompt:
-  base: |
-    당신은 전문 웹소설 번역가입니다. 아래 규칙을 반드시 따르세요.
+  base: |                             # 번역/복구 공통 system prompt 기본 규칙
+    ...
+  extra_rules:                        # 소설별 추가 규칙 목록 (선택)
+    - "..."
 
-    [출력 형식]
-    - 번역 결과 한 줄만 출력하세요. 설명, 주석, 따옴표, 원문 인용을 절대 추가하지 마세요.
+input: "input/novel.txt"              # 번역 태스크 입력 파일
+output: "output/novel_ko.txt"         # 번역 태스크 출력 파일
 
-    [충실도 — 최우선 원칙]
-    - 원문의 내용을 임의로 생략하거나 추가하지 마세요.
-    - 원문에 없는 묘사, 감정, 설명을 번역문에 덧붙이지 마세요.
-    - 원문에 있는 내용을 번역문에서 빠뜨리지 마세요.
-
-    [문체 및 어조]
-    - 한국 웹소설의 자연스러운 어조와 뉘앙스를 사용하세요.
-    - 중국어 사자성어, 일본어 관용어구 등은 동등한 의미의 한국어 표현이나 쉬운 서술어로 번역하세요.
-
-    [등장인물 말투]
-    - 각 인물의 성격과 말투를 임의로 바꾸지 마세요. 원문의 느낌을 그대로 살려야 합니다.
-    - 이전 번역 history를 참조하여 각 인물의 말투를 일관되게 유지하세요.
-
-    [이름 표기]
-    - 등장인물 이름은 아래 지정된 표기를 일관되게 사용하세요.
-  extra_rules: []
-
-input: "input/novel.txt"      # 번역 태스크 전용
-output: "output/novel_ko.txt" # 번역 태스크 전용
+# log_dir: "output/logs"              # 로그 파일 디렉터리 (기본값: {output_dir}/logs/)
+# log_level: "INFO"                   # DEBUG | INFO | WARNING | ERROR (기본값: INFO)
+# log_translation_step: 100           # 번역 INFO 로그 주기 (기본값: 100, 오류는 항상)
 ```
 
 ---
 
-## 4. Task A — 번역 (translate)
+## 4. 로거 (`logger.py`)
 
-### 4-1. 전체 흐름
+`logger.setup(log_dir, level)` 호출 시:
+1. `{log_dir}/{YYYYMMDD_HHMMSS}.log` 파일 핸들러 등록
+2. `sys.stdout`을 `_TeeStream`으로 교체 — `print()` 출력이 콘솔과 로그 파일에 동시 기록됨
+3. 로그 포맷: `HH:MM:SS [LEVEL] 메시지` (파일), `HH:MM:SS [출력 ] 라인` (콘솔 미러)
+
+기본 레벨 INFO에서 DEBUG 항목(각 줄 원문·번역 전문, 요약 전문)은 기록되지 않는다.
+
+---
+
+## 5. Task A — 번역 (translate)
+
+### 5-1. 전체 흐름
 
 ```
 [입력 파일 (원문 txt)]
         │
         ▼
 [Phase 1] 전처리 — 캐릭터/세계관 식별
-  1-1. tiktoken 청크 분할
-  1-2. LLM 병렬 캐릭터 추출
-  1-3. LLM 원작 세계관 추론
-  1-4. Playwright 구글 검색 + LLM 검증
-  1-5. 나무위키 캐릭터 프로필 크롤링 (검증된 작품만)
+  캐시(_verified_works.json) 존재 시 → 바로 나무위키 프로필 로드
+  캐시 없을 시:
+    1-1. tiktoken 청크 분할 + LLM 병렬 캐릭터 이름 추출
+    1-2. LLM 원작 세계관 추론 (catch-all/Unknown 후보 자동 제외)
+    1-3. DuckDuckGo 검색으로 나무위키 문서 URL 추출 + LLM 검증
+    1-4. _verified_works.json 캐시 저장
+  나무위키 캐릭터 프로필 추출 (3단계, 병렬):
+    Step 1: 등장인물 문서에서 LLM으로 이름 목록 추출
+    Step 2: 각 캐릭터 개별 나무위키 페이지 fetch
+    Step 3: LLM으로 캐릭터별 상세 프로필 생성
         │
         ▼
 [Phase 2] System Prompt 빌드
@@ -130,7 +140,7 @@ output: "output/novel_ko.txt" # 번역 태스크 전용
 [출력 파일 (번역 txt)]
 ```
 
-### 4-2. Messages 구조
+### 5-2. Messages 구조
 
 ```
 System: [base rules] + [캐릭터 프로필?] + [extra rules?] + [이야기 요약?]
@@ -141,33 +151,46 @@ Asst:   {번역된 한국어 한 줄}
 ...
 ```
 
-### 4-3. 롤링 요약
+### 5-3. 롤링 요약
 
 - history 턴 수 > `history_window` 시 트리거
 - 첫 번째: 전체 n쌍으로 요약
 - 이후: 이전 요약 + 후반 n/2쌍으로 갱신
 - 요약 후 messages = `[system]` + 후반 n/2쌍
 
-### 4-4. CLI
+### 5-4. 전처리 캐시 구조
+
+```
+.cache/
+├── _verified_works.json           # 작품 확정 결과 (extract/identify/verify 단계 재사용)
+│   [{work, characters, namuwiki_article}, ...]
+└── {article}_characters.json      # 나무위키 캐릭터 프로필 (작품별)
+    [{original, korean, desc, work}, ...]
+```
+
+`--no-cache` 플래그 지정 시 두 종류의 캐시 파일 모두 삭제 후 재실행.
+
+### 5-5. CLI
 
 ```bash
 python translate.py --config config.yaml
-python translate.py --config config.yaml --preprocess-only
-python translate.py --config config.yaml --no-cache
-python translate.py --config config.yaml --dry-run
+python translate.py --config config.yaml --preprocess-only   # 전처리만 실행
+python translate.py --config config.yaml --no-cache          # 캐시 무시 재실행
+python translate.py --config config.yaml --max-lines 200     # 앞 N줄만 번역
+python translate.py --config config.yaml --dry-run           # API 호출 없이 설정 확인
 python translate.py --input novel.txt --output novel_ko.txt --config config.yaml
 ```
 
 ---
 
-## 5. Task B — 데이터 복구 (recover)
+## 6. Task B — 데이터 복구 (recover)
 
-### 5-1. 개요
+### 6-1. 개요
 
 소실된 웹소설 데이터를 앞뒤 문맥과 LLM을 이용해 line-by-line으로 복구한다.  
 번역 태스크와 동일한 캐릭터 전처리 파이프라인을 재사용해 일관된 system prompt를 구성한다.
 
-### 5-2. 입력
+### 6-2. 입력
 
 | 항목 | 설명 |
 |------|------|
@@ -177,12 +200,12 @@ python translate.py --input novel.txt --output novel_ko.txt --config config.yaml
 | `--summary` | (선택) 지난 이야기 요약 문자열 또는 파일 경로 |
 | `--output` | 복구된 `l`줄을 저장할 출력 파일 |
 
-### 5-3. 전처리
+### 6-3. 전처리
 
 번역 태스크의 전처리 파이프라인(캐릭터 추출 → 세계관 추론 → 검증 → 나무위키)을  
-`--before` 파일을 입력으로 동일하게 실행한다. 캐시가 있으면 크롤링 생략.
+`--before` 파일을 입력으로 동일하게 실행한다. 캐시가 있으면 건너뜀.
 
-### 5-4. System Prompt 구성
+### 6-4. System Prompt 구성
 
 ```
 [base rules — 번역과 동일]
@@ -206,7 +229,7 @@ python translate.py --input novel.txt --output novel_ko.txt --config config.yaml
 after context는 messages history에 넣지 않고 system prompt에 참조 블록으로만 삽입한다.  
 LLM이 after를 미리 알고 있어 복구 내용이 자연스럽게 수렴하도록 유도한다.
 
-### 5-5. 복구 플로우 (line-by-line)
+### 6-5. 복구 플로우 (line-by-line)
 
 ```
 초기화:
@@ -222,23 +245,7 @@ for i in range(l):
   print(f"[복구] {i+1}/{l}: {recovered_line[:40]}")
 ```
 
-### 5-6. Messages 구조 예시
-
-```json
-[
-  {"role": "system",    "content": "...[base rules]\n\n[복구 안내]\n약 50줄 소실...\n\n[후속 문맥 참고]\n장웨이는 칼을 뽑았다..."},
-  {"role": "user",      "content": "계속"},
-  {"role": "assistant", "content": "그날 밤, 적막한 골목에는 바람만이 불었다."},
-  {"role": "user",      "content": "계속"},
-  {"role": "assistant", "content": "장웨이는 숨을 죽이며 그림자 속에 몸을 숨겼다."},
-  {"role": "user",      "content": "계속"},
-  {"role": "assistant", "content": "{recovered_line_1}"},
-  {"role": "user",      "content": "계속"},
-  {"role": "assistant", "content": "{recovered_line_2}"}
-]
-```
-
-### 5-7. CLI
+### 6-6. CLI
 
 ```bash
 # 기본 실행
@@ -261,33 +268,35 @@ python recover.py --config config.yaml \
   --summary summary.txt \
   --output recovered.txt
 
-# 드라이런
+# 드라이런 (API 호출 없이 설정 확인)
 python recover.py --config config.yaml \
   --before before.txt --after after.txt --lines 30 --dry-run
 ```
 
 ---
 
-## 6. 오류 처리
+## 7. 오류 처리
 
 | 상황 | 처리 방식 |
 |------|-----------|
 | API rate limit | exponential backoff 후 재시도 (최대 3회) |
-| 번역 API 오류 | 해당 줄 skip + 경고 로그, 원문 그대로 출력 |
-| 복구 API 오류 | 해당 줄 skip + 경고 로그, 빈 줄 출력 |
+| 번역 API 오류 | 해당 줄 skip + 오류 로그, 원문 그대로 출력 |
+| 복구 API 오류 | 해당 줄 skip + 오류 로그, 빈 줄 출력 |
 | 설정 파일 누락 | 즉시 종료 + 사용법 안내 |
 | 입력 파일 없음 | 즉시 종료 |
 | 출력 경로 없음 | 자동 디렉터리 생성 |
-| 구글 검색 실패 (봇 차단 등) | 해당 후보 검증 실패 처리 + 경고 로그 |
+| DuckDuckGo 검색 실패 | 해당 후보 검증 실패 처리 + 경고 로그 |
 | 나무위키 접근 실패 | 해당 작품 캐릭터 없이 진행 + 경고 로그 |
 | LLM 세계관 추론 결과 없음 | 캐릭터 섹션 생략하고 진행 |
+| catch-all 세계관 후보 | 검색 없이 필터링 (Unknown/Other/기타 패턴 자동 감지) |
 
 ---
 
-## 7. 비기능 요구사항
+## 8. 비기능 요구사항
 
 - Python 3.14+
 - 의존성: `openai`, `pyyaml`, `tenacity`, `requests`, `beautifulsoup4`, `playwright`, `tiktoken`
 - 출력 파일은 줄 단위 즉시 flush (crash-safe)
 - 전처리 캐시로 재실행 비용 절감 (번역/복구 공유)
 - 진행 상황 콘솔 출력: `[번역] 42/300`, `[복구] 12/50`
+- 로그 파일 자동 생성: `{log_dir}/{YYYYMMDD_HHMMSS}.log` (콘솔 출력 동시 기록)

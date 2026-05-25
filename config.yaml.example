@@ -1,28 +1,34 @@
 llm:
   base_url: "https://api.openai.com/v1"
-  api_key: "${OPENAI_API_KEY}"        # 환경변수 참조
-  model: "gpt-4o"
+  api_key: "${OPENAI_API_KEY}"        # 환경변수 참조. 직접 입력도 가능
+  model: "gpt-4o"                     # 미설정 시 /models API 첫 번째 모델 자동 사용
   temperature: 0.3
   max_completion_tokens: 4096
 
 translation:
   history_window: 20                  # 번역 history로 유지할 최대 턴 수
-  summary_overlap: 0.5                # 요약 후 재사용할 history 비율
-  source_language: auto               # auto | zh | ja | en
-  target_language: ko
+                                      # 초과 시 롤링 요약으로 system prompt 갱신
+  summary_overlap: 0.5                # 요약 후 재사용할 history 비율 (0.5 = 후반 50% 유지)
+  source_language: auto               # 원문 언어: auto | zh | ja | en
+  target_language: ko                 # 번역 목표 언어
   # max_lines: 200                    # 테스트용: 지정 줄 수만큼만 번역 (미설정 또는 null 시 전체)
+                                      # CLI: python translate.py --max-lines 200
 
 recovery:
-  before_lines: 20                    # 소실 전 컨텍스트로 사용할 최대 라인 수
-  after_lines: 10                     # 소실 후 forward reference로 사용할 최대 라인 수
+  before_lines: 20                    # 소실 전 컨텍스트로 사용할 최대 라인 수 (history로 주입)
+  after_lines: 10                     # 소실 후 forward reference로 사용할 최대 라인 수 (system prompt 참조 블록)
 
 preprocessing:
-  chunk_tokens: 6000                  # 캐릭터 추출 청크 최대 토큰 수
+  chunk_tokens: 6000                  # 캐릭터 추출 청크 최대 토큰 수 (tiktoken 기준)
   cache_dir: ".cache"                 # 전처리 캐시 저장 디렉터리
+                                      # 캐시 파일: _verified_works.json (작품 확정 결과),
+                                      #            {article}_characters.json (나무위키 캐릭터 프로필)
+                                      # --no-cache 플래그로 전부 삭제 후 재실행 가능
 
 search:
-  engine: duckduckgo                  # duckduckgo (requests 기반, 기본값) | playwright (헤드리스 Chrome)
-  headless: true                      # false 시 브라우저 창 표시 (디버깅용)
+  engine: duckduckgo                  # duckduckgo (requests 기반, 기본값, 봇 차단 없음)
+                                      # playwright (헤드리스 Chrome, Google 검색 — 봇 차단 가능)
+  headless: true                      # playwright 엔진 전용. false 시 브라우저 창 표시 (디버깅용)
   result_count: 5                     # 수집할 검색 결과 snippet 수
 
 system_prompt:
@@ -48,12 +54,17 @@ system_prompt:
     [이름 표기]
     - 등장인물 이름은 아래 지정된 표기를 일관되게 사용하세요.
   extra_rules:
-    # 소설별 추가 규칙 예시 (필요 시 주석 해제):
+    # 소설별 추가 규칙 (필요 시 주석 해제):
     # - "'오빠'는 반드시 '오빠'로, '언니'는 '언니'로 번역하세요."
     # - "전투 장면에서는 긴박감을 살린 짧고 강한 문장을 사용하세요."
 
-input: "input/novel.txt"
-output: "output/novel_ko.txt"
-# log_dir: "output/logs"              # 로그 파일 저장 디렉터리 (기본값: output 폴더 하위 logs/)
+input: "input/novel.txt"              # 번역 태스크 입력 파일 (CLI --input 으로 override 가능)
+output: "output/novel_ko.txt"         # 번역 태스크 출력 파일 (CLI --output 으로 override 가능)
+
+# 로그 설정
+# log_dir: "output/logs"              # 로그 파일 저장 디렉터리 (기본값: 출력 파일과 같은 폴더의 logs/)
+                                      # 로그 파일명: YYYYMMDD_HHMMSS.log
+                                      # 콘솔 출력도 로그 파일에 동시 기록됨
 # log_level: "INFO"                   # 로그 레벨: DEBUG | INFO | WARNING | ERROR (기본값: INFO)
+                                      # DEBUG: 각 줄 원문 앞 100자 + 번역 전문 기록
 # log_translation_step: 100           # 번역 줄 INFO 로그 주기 (기본값: 100, 오류는 항상 기록)
