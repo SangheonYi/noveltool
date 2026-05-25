@@ -1,0 +1,127 @@
+import os
+import re
+import sys
+import yaml
+from dataclasses import dataclass
+
+
+def _expand_env(value):
+    if isinstance(value, str):
+        return re.sub(r'\$\{(\w+)\}', lambda m: os.environ.get(m.group(1), m.group(0)), value)
+    if isinstance(value, dict):
+        return {k: _expand_env(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_expand_env(v) for v in value]
+    return value
+
+
+@dataclass
+class LLMConfig:
+    base_url: str
+    api_key: str
+    model: str
+    temperature: float
+    max_completion_tokens: int
+
+
+@dataclass
+class TranslationConfig:
+    history_window: int
+    summary_overlap: float
+    source_language: str
+    target_language: str
+
+
+@dataclass
+class PreprocessingConfig:
+    chunk_tokens: int
+    cache_dir: str
+
+
+@dataclass
+class SearchConfig:
+    engine: str
+    headless: bool
+    result_count: int
+
+
+@dataclass
+class RecoveryConfig:
+    before_lines: int
+    after_lines: int
+
+
+@dataclass
+class SystemPromptConfig:
+    base: str
+    extra_rules: list[str]
+
+
+@dataclass
+class Config:
+    llm: LLMConfig
+    translation: TranslationConfig
+    recovery: RecoveryConfig
+    preprocessing: PreprocessingConfig
+    search: SearchConfig
+    system_prompt: SystemPromptConfig
+    input: str
+    output: str
+
+
+def load_config(path: str) -> Config:
+    try:
+        with open(path, encoding='utf-8') as f:
+            raw = yaml.safe_load(f)
+    except FileNotFoundError:
+        print(f"오류: 설정 파일을 찾을 수 없습니다: {path}", file=sys.stderr)
+        sys.exit(1)
+
+    raw = _expand_env(raw)
+
+    llm_raw = raw.get('llm', {})
+    for key in ('base_url', 'api_key', 'model'):
+        if not llm_raw.get(key):
+            print(f"오류: llm.{key} 가 설정 파일에 없습니다.", file=sys.stderr)
+            sys.exit(1)
+
+    translation_raw = raw.get('translation', {})
+    recovery_raw = raw.get('recovery', {})
+    preprocessing_raw = raw.get('preprocessing', {})
+    search_raw = raw.get('search', {})
+    system_prompt_raw = raw.get('system_prompt', {})
+
+    return Config(
+        llm=LLMConfig(
+            base_url=llm_raw['base_url'],
+            api_key=llm_raw['api_key'],
+            model=llm_raw['model'],
+            temperature=float(llm_raw.get('temperature', 0.3)),
+            max_completion_tokens=int(llm_raw.get('max_completion_tokens', 4096)),
+        ),
+        translation=TranslationConfig(
+            history_window=int(translation_raw.get('history_window', 20)),
+            summary_overlap=float(translation_raw.get('summary_overlap', 0.5)),
+            source_language=translation_raw.get('source_language', 'auto'),
+            target_language=translation_raw.get('target_language', 'ko'),
+        ),
+        recovery=RecoveryConfig(
+            before_lines=int(recovery_raw.get('before_lines', 20)),
+            after_lines=int(recovery_raw.get('after_lines', 10)),
+        ),
+        preprocessing=PreprocessingConfig(
+            chunk_tokens=int(preprocessing_raw.get('chunk_tokens', 6000)),
+            cache_dir=preprocessing_raw.get('cache_dir', '.cache'),
+        ),
+        search=SearchConfig(
+            engine=search_raw.get('engine', 'playwright'),
+            headless=bool(search_raw.get('headless', True)),
+            result_count=int(search_raw.get('result_count', 5)),
+        ),
+        system_prompt=SystemPromptConfig(
+            base=system_prompt_raw.get('base', ''),
+            extra_rules=system_prompt_raw.get('extra_rules', []),
+        ),
+        input=raw.get('input', ''),
+        output=raw.get('output', ''),
+    )

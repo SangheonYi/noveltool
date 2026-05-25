@@ -1,0 +1,55 @@
+llm:
+  base_url: "https://api.openai.com/v1"
+  api_key: "${OPENAI_API_KEY}"        # 환경변수 참조
+  model: "gpt-4o"
+  temperature: 0.3
+  max_completion_tokens: 4096
+
+translation:
+  history_window: 20                  # 번역 history로 유지할 최대 턴 수
+  summary_overlap: 0.5                # 요약 후 재사용할 history 비율
+  source_language: auto               # auto | zh | ja | en
+  target_language: ko
+
+recovery:
+  before_lines: 20                    # 소실 전 컨텍스트로 사용할 최대 라인 수
+  after_lines: 10                     # 소실 후 forward reference로 사용할 최대 라인 수
+
+preprocessing:
+  chunk_tokens: 6000                  # 캐릭터 추출 청크 최대 토큰 수
+  cache_dir: ".cache"                 # 전처리 캐시 저장 디렉터리
+
+search:
+  engine: playwright                  # playwright 헤드리스 Chrome 사용
+  headless: true                      # false 시 브라우저 창 표시 (디버깅용)
+  result_count: 5                     # 수집할 검색 결과 snippet 수
+
+system_prompt:
+  base: |
+    당신은 전문 웹소설 번역가입니다. 아래 규칙을 반드시 따르세요.
+
+    [출력 형식]
+    - 번역 결과 한 줄만 출력하세요. 설명, 주석, 따옴표, 원문 인용을 절대 추가하지 마세요.
+
+    [충실도 — 최우선 원칙]
+    - 원문의 내용을 임의로 생략하거나 추가하지 마세요.
+    - 원문에 없는 묘사, 감정, 설명을 번역문에 덧붙이지 마세요.
+    - 원문에 있는 내용을 번역문에서 빠뜨리지 마세요.
+
+    [문체 및 어조]
+    - 한국 웹소설의 자연스러운 어조와 뉘앙스를 사용하세요.
+    - 중국어 사자성어, 일본어 관용어구 등은 동등한 의미의 한국어 표현이나 쉬운 서술어로 번역하세요.
+
+    [등장인물 말투]
+    - 각 인물의 성격과 말투를 임의로 바꾸지 마세요. 원문의 느낌을 그대로 살려야 합니다.
+    - 이전 번역 history를 참조하여 각 인물의 말투를 일관되게 유지하세요.
+
+    [이름 표기]
+    - 등장인물 이름은 아래 지정된 표기를 일관되게 사용하세요.
+  extra_rules:
+    # 소설별 추가 규칙 예시 (필요 시 주석 해제):
+    # - "'오빠'는 반드시 '오빠'로, '언니'는 '언니'로 번역하세요."
+    # - "전투 장면에서는 긴박감을 살린 짧고 강한 문장을 사용하세요."
+
+input: "input/novel.txt"
+output: "output/novel_ko.txt"
