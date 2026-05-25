@@ -8,7 +8,7 @@ from .llm_client import LLMClient
 from .preprocessor.extractor import extract_characters
 from .preprocessor.identifier import identify_works
 from .preprocessor.namuwiki import CharacterProfile, fetch_characters
-from .preprocessor.verifier import verify_works
+from .preprocessor.verifier import VerifiedWork, verify_works
 from .prompt import build_system_prompt, update_summary
 from .summarizer import summarize
 
@@ -45,41 +45,77 @@ def run(config: Config, preprocess_only: bool = False, no_cache: bool = False) -
     _translate(config, lines, system_prompt, len(lines))
 
 
+def _verified_works_cache_path(cache_dir: str) -> str:
+    return os.path.join(cache_dir, '_verified_works.json')
+
+
+def _load_verified_works_cache(cache_dir: str) -> list[VerifiedWork] | None:
+    path = _verified_works_cache_path(cache_dir)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, encoding='utf-8') as f:
+            data = json.load(f)
+        return [VerifiedWork(**d) for d in data]
+    except Exception:
+        return None
+
+
+def _save_verified_works_cache(cache_dir: str, verified: list[VerifiedWork]) -> None:
+    os.makedirs(cache_dir, exist_ok=True)
+    path = _verified_works_cache_path(cache_dir)
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump([{'work': v.work, 'characters': v.characters, 'namuwiki_article': v.namuwiki_article}
+                   for v in verified], f, ensure_ascii=False, indent=2)
+
+
 def _preprocess(config: Config, lines: list[str], no_cache: bool) -> list[CharacterProfile]:
     log = logger.get()
+    cache_dir = config.preprocessing.cache_dir
+
     if no_cache:
-        _clear_cache(config.preprocessing.cache_dir)
+        _clear_cache(cache_dir)
+
+    # 검증된 작품 캐시 확인 → 캐시 hit 시 추출·추론·검색 단계 전부 건너뜀
+    verified = _load_verified_works_cache(cache_dir)
+    if verified is not None:
+        log.info('[전처리] 검증된 작품 캐시 로드: %s', [v.work for v in verified])
+        print(f'[전처리] 검증된 작품 캐시 로드 → {[v.work for v in verified]}')
+    else:
+        llm_client = LLMClient(config)
+
+        raw_chars = extract_characters(llm_client, lines, config.preprocessing.chunk_tokens, config.llm.model)
+        if not raw_chars:
+            log.warning('[전처리] 추출된 캐릭터 없음')
+            print('[전처리] 추출된 캐릭터 없음 — 캐릭터 없이 진행')
+            return []
+
+        candidates = identify_works(llm_client, raw_chars)
+        if not candidates:
+            log.warning('[전처리] 원작 추론 결과 없음')
+            print('[전처리] 원작 추론 결과 없음 — 캐릭터 없이 진행')
+            return []
+
+        verified = verify_works(
+            llm_client,
+            candidates,
+            engine=config.search.engine,
+            headless=config.search.headless,
+            result_count=config.search.result_count,
+            debug_dir=cache_dir,
+        )
+        if not verified:
+            log.warning('[전처리] 검증된 원작 없음')
+            print('[전처리] 검증된 원작 없음 — 캐릭터 없이 진행')
+            return []
+
+        _save_verified_works_cache(cache_dir, verified)
+        log.info('[전처리] 검증된 작품 캐시 저장: %s', [v.work for v in verified])
 
     llm_client = LLMClient(config)
-
-    raw_chars = extract_characters(llm_client, lines, config.preprocessing.chunk_tokens, config.llm.model)
-    if not raw_chars:
-        log.warning('[전처리] 추출된 캐릭터 없음')
-        print('[전처리] 추출된 캐릭터 없음 — 캐릭터 없이 진행')
-        return []
-
-    candidates = identify_works(llm_client, raw_chars)
-    if not candidates:
-        log.warning('[전처리] 원작 추론 결과 없음')
-        print('[전처리] 원작 추론 결과 없음 — 캐릭터 없이 진행')
-        return []
-
-    verified = verify_works(
-        llm_client,
-        candidates,
-        engine=config.search.engine,
-        headless=config.search.headless,
-        result_count=config.search.result_count,
-        debug_dir=config.preprocessing.cache_dir,
-    )
-    if not verified:
-        log.warning('[전처리] 검증된 원작 없음')
-        print('[전처리] 검증된 원작 없음 — 캐릭터 없이 진행')
-        return []
-
     all_characters: list[CharacterProfile] = []
     for work in verified:
-        chars = fetch_characters(work.namuwiki_article, config.preprocessing.cache_dir, llm_client)
+        chars = fetch_characters(work.namuwiki_article, cache_dir, llm_client)
         all_characters.extend(chars)
 
     log.info('[전처리] 완료: 총 %d명', len(all_characters))
@@ -90,7 +126,7 @@ def _clear_cache(cache_dir: str) -> None:
     if not os.path.isdir(cache_dir):
         return
     for fname in os.listdir(cache_dir):
-        if fname.endswith('_characters.json'):
+        if fname.endswith('_characters.json') or fname == '_verified_works.json':
             os.remove(os.path.join(cache_dir, fname))
     print(f'[캐시] {cache_dir} 초기화 완료')
 
