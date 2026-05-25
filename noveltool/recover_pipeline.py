@@ -68,8 +68,10 @@ def _preprocess(config: Config, lines: list[str]) -> list[CharacterProfile]:
     verified = verify_works(
         llm_client,
         candidates,
+        engine=config.search.engine,
         headless=config.search.headless,
         result_count=config.search.result_count,
+        debug_dir=config.preprocessing.cache_dir,
     )
     if not verified:
         print('[전처리] 검증된 원작 없음 — 캐릭터 없이 진행')
@@ -77,7 +79,7 @@ def _preprocess(config: Config, lines: list[str]) -> list[CharacterProfile]:
 
     all_characters: list[CharacterProfile] = []
     for work in verified:
-        chars = fetch_characters(work.namuwiki_article, config.preprocessing.cache_dir)
+        chars = fetch_characters(work.namuwiki_article, config.preprocessing.cache_dir, llm_client)
         all_characters.extend(chars)
 
     return all_characters

@@ -15,8 +15,11 @@ def run(config: Config, preprocess_only: bool = False, no_cache: bool = False) -
     with open(config.input, encoding='utf-8') as f:
         lines = [line.rstrip('\n') for line in f]
 
-    total = len(lines)
-    print(f'[파이프라인] 입력: {config.input} ({total}줄)')
+    if config.translation.max_lines:
+        lines = lines[:config.translation.max_lines]
+        print(f'[파이프라인] 입력: {config.input} (max_lines {config.translation.max_lines} 적용 → {len(lines)}줄 처리)')
+    else:
+        print(f'[파이프라인] 입력: {config.input} ({len(lines)}줄)')
 
     print('\n[Phase 1] 전처리 시작')
     characters = _preprocess(config, lines, no_cache)
@@ -31,7 +34,7 @@ def run(config: Config, preprocess_only: bool = False, no_cache: bool = False) -
     system_prompt = build_system_prompt(config, characters)
 
     print('\n[Phase 3] 번역 시작')
-    _translate(config, lines, system_prompt, total)
+    _translate(config, lines, system_prompt, len(lines))
 
 
 def _preprocess(config: Config, lines: list[str], no_cache: bool) -> list[CharacterProfile]:
@@ -53,8 +56,10 @@ def _preprocess(config: Config, lines: list[str], no_cache: bool) -> list[Charac
     verified = verify_works(
         llm_client,
         candidates,
+        engine=config.search.engine,
         headless=config.search.headless,
         result_count=config.search.result_count,
+        debug_dir=config.preprocessing.cache_dir,
     )
     if not verified:
         print('[전처리] 검증된 원작 없음 — 캐릭터 없이 진행')
@@ -62,7 +67,7 @@ def _preprocess(config: Config, lines: list[str], no_cache: bool) -> list[Charac
 
     all_characters: list[CharacterProfile] = []
     for work in verified:
-        chars = fetch_characters(work.namuwiki_article, config.preprocessing.cache_dir)
+        chars = fetch_characters(work.namuwiki_article, config.preprocessing.cache_dir, llm_client)
         all_characters.extend(chars)
 
     return all_characters

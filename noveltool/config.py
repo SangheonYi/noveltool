@@ -31,6 +31,7 @@ class TranslationConfig:
     summary_overlap: float
     source_language: str
     target_language: str
+    max_lines: int | None
 
 
 @dataclass
@@ -125,6 +126,7 @@ def load_config(path: str) -> Config:
             summary_overlap=float(translation_raw.get('summary_overlap', 0.5)),
             source_language=translation_raw.get('source_language', 'auto'),
             target_language=translation_raw.get('target_language', 'ko'),
+            max_lines=int(translation_raw['max_lines']) if translation_raw.get('max_lines') else None,
         ),
         recovery=RecoveryConfig(
             before_lines=int(recovery_raw.get('before_lines', 20)),

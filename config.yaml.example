@@ -10,6 +10,7 @@ translation:
   summary_overlap: 0.5                # 요약 후 재사용할 history 비율
   source_language: auto               # auto | zh | ja | en
   target_language: ko
+  # max_lines: 200                    # 테스트용: 지정 줄 수만큼만 번역 (미설정 또는 null 시 전체)
 
 recovery:
   before_lines: 20                    # 소실 전 컨텍스트로 사용할 최대 라인 수
@@ -20,7 +21,7 @@ preprocessing:
   cache_dir: ".cache"                 # 전처리 캐시 저장 디렉터리
 
 search:
-  engine: playwright                  # playwright 헤드리스 Chrome 사용
+  engine: duckduckgo                  # duckduckgo (requests 기반, 기본값) | playwright (헤드리스 Chrome)
   headless: true                      # false 시 브라우저 창 표시 (디버깅용)
   result_count: 5                     # 수집할 검색 결과 snippet 수
 
