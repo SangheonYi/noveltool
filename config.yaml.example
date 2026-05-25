@@ -21,9 +21,8 @@ recovery:
 preprocessing:
   chunk_tokens: 6000                  # 캐릭터 추출 청크 최대 토큰 수 (tiktoken 기준)
   cache_dir: ".cache"                 # 전처리 캐시 저장 디렉터리
-                                      # 캐시 파일: _verified_works.json (작품 확정 결과),
-                                      #            {article}_characters.json (나무위키 캐릭터 프로필)
-                                      # --no-cache 플래그로 전부 삭제 후 재실행 가능
+                                      # 캐시 파일: {article}_characters.json (나무위키 캐릭터 프로필, 작품별)
+                                      # --no-cache 플래그로 삭제 후 재실행 가능
 
 search:
   engine: duckduckgo                  # duckduckgo (requests 기반, 기본값, 봇 차단 없음)

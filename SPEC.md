@@ -117,16 +117,14 @@ output: "output/novel_ko.txt"         # 번역 태스크 출력 파일
         │
         ▼
 [Phase 1] 전처리 — 캐릭터/세계관 식별
-  캐시(_verified_works.json) 존재 시 → 바로 나무위키 프로필 로드
-  캐시 없을 시:
-    1-1. tiktoken 청크 분할 + LLM 병렬 캐릭터 이름 추출
-    1-2. LLM 원작 세계관 추론 (catch-all/Unknown 후보 자동 제외)
-    1-3. DuckDuckGo 검색으로 나무위키 문서 URL 추출 + LLM 검증
-    1-4. _verified_works.json 캐시 저장
+  1-1. tiktoken 청크 분할 + LLM 병렬 캐릭터 이름 추출
+  1-2. LLM 원작 세계관 추론 (catch-all/Unknown 후보 자동 제외)
+  1-3. DuckDuckGo 검색으로 나무위키 문서 URL 추출 + LLM 검증
   나무위키 캐릭터 프로필 추출 (3단계, 병렬):
     Step 1: 등장인물 문서에서 LLM으로 이름 목록 추출
     Step 2: 각 캐릭터 개별 나무위키 페이지 fetch
     Step 3: LLM으로 캐릭터별 상세 프로필 생성
+    → 작품별 JSON 캐시 저장 (재실행 시 나무위키 fetch 생략)
         │
         ▼
 [Phase 2] System Prompt 빌드
@@ -162,13 +160,12 @@ Asst:   {번역된 한국어 한 줄}
 
 ```
 .cache/
-├── _verified_works.json           # 작품 확정 결과 (extract/identify/verify 단계 재사용)
-│   [{work, characters, namuwiki_article}, ...]
 └── {article}_characters.json      # 나무위키 캐릭터 프로필 (작품별)
     [{original, korean, desc, work}, ...]
 ```
 
-`--no-cache` 플래그 지정 시 두 종류의 캐시 파일 모두 삭제 후 재실행.
+캐릭터 프로필만 캐싱한다. 추출/추론/검색(1~3단계)은 매 실행마다 진행한다.  
+`--no-cache` 플래그 지정 시 `_characters.json` 파일 전부 삭제 후 재실행.
 
 ### 5-5. CLI
 

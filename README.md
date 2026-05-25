@@ -74,8 +74,8 @@ python translate.py --config config.yaml --dry-run
 1. 원문 전체를 청크로 분할해 등장인물 이름 병렬 추출
 2. LLM으로 원작 세계관 추론 → DuckDuckGo 검색으로 나무위키 문서 특정
 3. 검증된 작품의 나무위키 캐릭터 페이지에서 LLM으로 프로필 추출 (3단계 병렬)
-4. 전처리 결과를 캐시에 저장 (재실행 시 1~3 단계 건너뜀)
-5. line-by-line 번역, `history_window` 초과 시 롤링 요약으로 system prompt 갱신
+   - 캐릭터 프로필은 작품별 JSON으로 캐시 → 재실행 시 나무위키 fetch 생략
+4. line-by-line 번역, `history_window` 초과 시 롤링 요약으로 system prompt 갱신
 
 ### 복구
 
