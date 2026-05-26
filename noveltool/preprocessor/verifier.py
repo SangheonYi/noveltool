@@ -18,6 +18,49 @@ class VerifiedWork:
     namuwiki_article: str
 
 
+_NAMUWIKI_SKIP_PREFIXES = ('틀:', '분류:', '템플릿:', '파일:', '분류:파일/')
+_NAMUWIKI_SKIP_SUFFIXES = ('채널', '갤러리', '마이너 갤러리')
+
+
+def _namuwiki_search(work_name: str, result_count: int) -> tuple[list[str], list[str]]:
+    """나무위키 직접 검색. 스니펫 없이 문서 목록만 반환."""
+    log = logger.get()
+    articles: list[str] = []
+    query = f'{work_name} 등장인물'
+    log.debug('[검색] 나무위키 쿼리: %s', query)
+    try:
+        url = f'https://namu.wiki/Search?q={quote_plus(query)}'
+        headers = {
+            'User-Agent': (
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                'AppleWebKit/537.36 (KHTML, like Gecko) '
+                'Chrome/124.0.0.0 Safari/537.36'
+            ),
+            'Accept-Language': 'ko-KR,ko;q=0.9',
+        }
+        resp = requests.get(url, headers=headers, timeout=15)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, 'html.parser')
+        for a in soup.find_all('a', href=True):
+            href = a['href']
+            if not href.startswith('/w/'):
+                continue
+            title = unquote(href[3:]).replace('+', ' ')
+            if any(title.startswith(p) for p in _NAMUWIKI_SKIP_PREFIXES):
+                continue
+            if any(title.endswith(s) for s in _NAMUWIKI_SKIP_SUFFIXES):
+                continue
+            if title not in articles:
+                articles.append(title)
+        log.info('[검색] 나무위키 결과: 문서 %d개', len(articles))
+        if articles:
+            log.debug('[검색] 나무위키 문서 목록:\n%s', '\n'.join(f'  - {a}' for a in articles))
+    except Exception as e:
+        log.error('[검색] 나무위키 검색 실패 (%s): %s', query, e)
+        print(f'[경고] 나무위키 검색 실패 ({query}): {e}')
+    return [], articles[:result_count * 3]  # LLM 판단용으로 넉넉하게
+
+
 def _extract_namuwiki_title(href: str) -> str | None:
     """DDG redirect href에서 namu.wiki 문서명 추출."""
     match = re.search(r'uddg=([^&]+)', href)
@@ -139,9 +182,13 @@ def _playwright_google_search(query: str, headless: bool, result_count: int, deb
     return snippets[:result_count], []
 
 
-def _search(query: str, engine: str, headless: bool, result_count: int, debug_dir: str) -> tuple[list[str], list[str]]:
+def _search(work_name: str, engine: str, headless: bool, result_count: int, debug_dir: str) -> tuple[list[str], list[str]]:
+    if engine == 'namuwiki':
+        return _namuwiki_search(work_name, result_count)
     if engine == 'duckduckgo':
+        query = f'{work_name} 등장인물 나무위키'
         return _duckduckgo_search(query, result_count)
+    query = f'{work_name} 등장인물 나무위키'
     return _playwright_google_search(query, headless, result_count, debug_dir)
 
 
@@ -162,38 +209,35 @@ def _verify_single(
     debug_dir: str = '.cache',
 ) -> 'VerifiedWork | None':
     log = logger.get()
-    query = f'{candidate.work} 등장인물 나무위키'
-    snippets, namu_articles = _search(query, engine, headless, result_count, debug_dir)
+    # 괄호 안 영문 부제 제거 ("붕괴: 스타레일 (Honkai: Star Rail)" → "붕괴: 스타레일")
+    work_name = re.sub(r'\s*\(.*?\)', '', candidate.work).strip()
+    snippets, namu_articles = _search(work_name, engine, headless, result_count, debug_dir)
 
     if not snippets and not namu_articles:
         log.warning('[검증] \'%s\' 검색 결과 없음 — 검증 실패', candidate.work)
         print(f'[전처리] \'{candidate.work}\' 검색 결과 없음 — 검증 실패')
         return None
 
-    # DDG에서 나무위키 링크를 직접 찾은 경우 LLM 검증 생략
-    if namu_articles:
-        namuwiki_article = _best_namuwiki_article(namu_articles)
-        log.info('[검증] \'%s\' 나무위키 문서 발견 (LLM 검증 생략) → %s', candidate.work, namuwiki_article)
-        log.debug('[검증] 발견된 나무위키 문서 목록: %s', namu_articles)
-        print(f'[전처리] \'{candidate.work}\' 검색에서 나무위키 문서 발견 → {namuwiki_article}')
-        return VerifiedWork(
-            work=candidate.work,
-            characters=candidate.characters,
-            namuwiki_article=namuwiki_article,
-        )
-
-    # 스니펫만 있는 경우 LLM 검증
-    snippets_text = '\n'.join(f'- {s}' for s in snippets)
+    # LLM에게 스니펫 + 나무위키 링크 목록을 함께 넘겨 정확한 문서명 판단
+    snippets_text = '\n'.join(f'- {s}' for s in snippets) if snippets else '(없음)'
+    namu_hint = (
+        '\n\n검색에서 발견된 나무위키 문서 목록 (이 중 해당 작품 문서가 있으면 선택):\n'
+        + '\n'.join(f'- {a}' for a in namu_articles)
+        if namu_articles else ''
+    )
+    log.debug('[검증] 발견된 나무위키 문서 목록: %s', namu_articles)
     messages = [
         {
             'role': 'user',
             'content': (
                 f'아래는 "{candidate.work}"에 대한 검색 결과입니다.\n'
                 '검색 결과를 바탕으로 이 작품이 실존하는지, 그리고 나무위키 문서가 있는지 판단하세요.\n\n'
-                f'검색 결과:\n{snippets_text}\n\n'
+                f'검색 결과:\n{snippets_text}'
+                f'{namu_hint}\n\n'
                 '판단 기준:\n'
                 '- 나무위키, 위키백과, 공식 사이트 등 신뢰할 수 있는 출처에서 작품이 확인되면 verified\n'
-                '- 검색 결과가 없거나 무관하면 unverified\n\n'
+                '- 검색 결과가 없거나 무관하면 unverified\n'
+                '- 나무위키 문서 목록이 있어도 해당 작품과 무관한 문서는 선택하지 마세요\n\n'
                 'JSON으로만 응답하세요:\n'
                 '{"verified": true/false, "reason": "판단 근거", "namuwiki_article": "나무위키 한국어 문서명 (없으면 null)"}'
             ),

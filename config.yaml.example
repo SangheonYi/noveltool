@@ -25,7 +25,8 @@ preprocessing:
                                       # --no-cache 플래그로 삭제 후 재실행 가능
 
 search:
-  engine: duckduckgo                  # duckduckgo (requests 기반, 기본값, 봇 차단 없음)
+  engine: namuwiki                    # namuwiki (나무위키 직접 검색, 기본값, 가장 안정적)
+                                      # duckduckgo (requests 기반, 봇 차단 가능)
                                       # playwright (헤드리스 Chrome, Google 검색 — 봇 차단 가능)
   headless: true                      # playwright 엔진 전용. false 시 브라우저 창 표시 (디버깅용)
   result_count: 5                     # 수집할 검색 결과 snippet 수
