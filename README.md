@@ -1,17 +1,19 @@
 # noveltool
 
-LLM 기반 웹소설 처리 도구. 번역과 소실 데이터 복구 두 가지 기능을 제공한다.
+LLM 기반 웹소설 처리 도구. 번역, epub 변환, 소실 데이터 복구 기능을 제공한다.
 
 ## 기능
 
 | 명령 | 설명 |
 |------|------|
 | `translate` | 중국어 / 일본어 / 영어 원문을 한국어로 line-by-line 번역 |
+| `epub_to_txt` | epub 파일을 plain text로 변환 (후리가나 자동 제거) |
 | `recover` | 소실된 웹소설 구간을 앞뒤 문맥 기반으로 line-by-line 복구 |
 
 **공통 특징:**
 - 나무위키 자동 크롤링으로 등장인물 프로필을 system prompt에 주입
 - 롤링 요약으로 장편 소설에서도 맥락 유지
+- 번역 중단 시 state 파일로 context(history·요약) 보존 → 이어쓰기
 - 전처리 결과 JSON 캐시로 재실행 비용 절감
 - 실행 로그를 파일에 자동 저장 (콘솔 출력 동시 기록)
 
@@ -47,6 +49,23 @@ llm:
 
 ## 사용법
 
+### epub → txt 변환
+
+```bash
+# 같은 폴더에 .txt 생성
+python epub_to_txt.py novel.epub
+
+# 출력 경로 직접 지정
+python epub_to_txt.py novel.epub output/novel.txt
+
+# 챕터 구분자 삽입
+python epub_to_txt.py novel.epub --chapter-sep "==="
+```
+
+- epub spine 순서대로 챕터를 추출하고 HTML 태그 제거
+- `<ruby>` 태그의 후리가나(`<rt>`) 자동 제거 → 한자/한어 기본 글자만 유지
+- 추가 의존성 없음 (stdlib `zipfile` + 기설치 `beautifulsoup4`)
+
 ### 번역
 
 ```bash
@@ -72,10 +91,21 @@ python translate.py --config config.yaml --dry-run
 
 **번역 플로우:**
 1. 원문 전체를 청크로 분할해 등장인물 이름 병렬 추출
-2. LLM으로 원작 세계관 추론 → DuckDuckGo 검색으로 나무위키 문서 특정
+2. LLM으로 원작 세계관 추론 → 나무위키 직접 검색으로 문서 후보 수집 + LLM 검증
 3. 검증된 작품의 나무위키 캐릭터 페이지에서 LLM으로 프로필 추출 (3단계 병렬)
    - 캐릭터 프로필은 작품별 JSON으로 캐시 → 재실행 시 나무위키 fetch 생략
 4. line-by-line 번역, `history_window` 초과 시 롤링 요약으로 system prompt 갱신
+5. 매 줄마다 state(`{output}.state.json`) 저장 → 중단 후 재실행 시 history·요약문 완전 복원
+
+**병렬 배치 실행:**
+
+```bash
+# 최대 10개 동시 번역 (완료 파일 자동 스킵, 부분 완료 파일 이어쓰기)
+bash translate_parallel.sh
+
+# 진행 상황 실시간 모니터링
+watch -n 1 bash watch_progress.sh
+```
 
 ### 복구
 
@@ -131,6 +161,10 @@ log_translation_step: 100    # INFO 로그 주기 (N줄마다 진행률 기록, 
 noveltool/
 ├── translate.py               # 번역 CLI
 ├── recover.py                 # 복구 CLI
+├── epub_to_txt.py             # epub → txt 변환 CLI
+├── translate_parallel.sh      # 병렬 배치 번역 (최대 10개 동시)
+├── translate_batch.sh         # 순차 배치 번역
+├── watch_progress.sh          # 진행 상황 모니터링 (watch -n 1 bash watch_progress.sh)
 ├── config.yaml.example        # 설정 예시 (전체 옵션 및 주석)
 ├── SPEC.md                    # 상세 설계 문서
 └── noveltool/
@@ -140,12 +174,12 @@ noveltool/
     ├── history.py             # history 윈도우 관리
     ├── summarizer.py          # 롤링 요약 생성
     ├── prompt.py              # system prompt 빌더
-    ├── pipeline.py            # 번역 파이프라인
+    ├── pipeline.py            # 번역 파이프라인 (state 저장/이어쓰기 포함)
     ├── recover_pipeline.py    # 복구 파이프라인
     └── preprocessor/
         ├── extractor.py       # tiktoken 청크 분할 + 병렬 캐릭터 추출
         ├── identifier.py      # LLM 원작 세계관 추론
-        ├── verifier.py        # DuckDuckGo 검색 + LLM 검증
+        ├── verifier.py        # 나무위키 직접 검색 + LLM 검증
         └── namuwiki.py        # 나무위키 LLM 프로필 추출 (3단계 병렬)
 ```
 

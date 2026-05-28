@@ -13,6 +13,34 @@ from .prompt import build_system_prompt, update_summary
 from .summarizer import summarize
 
 
+def _state_path(output: str) -> str:
+    return output + '.state.json'
+
+
+def _save_state(state_path: str, done_lines: int, prior_summary: str | None,
+                system_prompt: str, history: HistoryManager) -> None:
+    data = {
+        'done_lines': done_lines,
+        'prior_summary': prior_summary,
+        'system_prompt': system_prompt,
+        'history_pairs': history._pairs,
+    }
+    tmp = state_path + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False)
+    os.replace(tmp, state_path)
+
+
+def _load_state(state_path: str) -> dict | None:
+    if not os.path.exists(state_path):
+        return None
+    try:
+        with open(state_path, encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
 def run(config: Config, preprocess_only: bool = False, no_cache: bool = False) -> None:
     log = logger.get()
     with open(config.input, encoding='utf-8') as f:
@@ -107,17 +135,46 @@ def _translate(config: Config, lines: list[str], system_prompt: str, total: int)
     out_dir = os.path.dirname(os.path.abspath(config.output))
     os.makedirs(out_dir, exist_ok=True)
 
+    # Resume from saved state (preserves history/summary context)
+    done_lines = 0
+    sp = _state_path(config.output)
+    state = _load_state(sp)
+    if state:
+        done_lines = state['done_lines']
+        if done_lines >= total:
+            print(f'[번역] 이미 완료된 파일 ({done_lines}줄) — 건너뜀')
+            return
+        prior_summary = state.get('prior_summary')
+        system_prompt = state.get('system_prompt', system_prompt)
+        history._pairs = [tuple(p) for p in state.get('history_pairs', [])]
+        print(f'[이어쓰기] state 복원: {done_lines}줄 완료, history {len(history._pairs)}쌍, 요약문 {"있음" if prior_summary else "없음"}')
+        log.info('[이어쓰기] state 복원: %d줄 완료, history %d쌍', done_lines, len(history._pairs))
+        lines = lines[done_lines:]
+    elif os.path.exists(config.output):
+        # 출력 파일만 있고 state가 없는 경우: 줄 수만 맞춤 (history 없이 이어쓰기)
+        with open(config.output, 'r', encoding='utf-8') as f:
+            done_lines = sum(1 for _ in f)
+        if done_lines >= total:
+            print(f'[번역] 이미 완료된 파일 ({done_lines}줄) — 건너뜀')
+            return
+        if done_lines > 0:
+            print(f'[이어쓰기] 출력 {done_lines}줄 감지 (state 없음, history 미복원) → {done_lines + 1}번째 줄부터 재개')
+            log.info('[이어쓰기] 출력 %d줄 감지 (state 없음) → %d번째 줄', done_lines, done_lines + 1)
+            lines = lines[done_lines:]
+
     log.info('[번역] 프롬프트 템플릿 (시스템 프롬프트):\n%s', system_prompt)
     log.info('[번역] INFO 로그 주기: %d줄마다 (오류는 항상 기록)', step)
 
     success_count = 0
     error_count = 0
+    write_mode = 'a' if done_lines > 0 else 'w'
 
-    with open(config.output, 'w', encoding='utf-8') as out:
-        for i, line in enumerate(lines, 1):
+    with open(config.output, write_mode, encoding='utf-8') as out:
+        for i, line in enumerate(lines, done_lines + 1):
             if not line.strip():
                 out.write('\n')
                 out.flush()
+                _save_state(sp, i, prior_summary, system_prompt, history)
                 continue
 
             messages = [{'role': 'system', 'content': system_prompt}]
@@ -145,6 +202,7 @@ def _translate(config: Config, lines: list[str], system_prompt: str, total: int)
             history.add_turn(line, translated)
             out.write(translated + '\n')
             out.flush()
+            _save_state(sp, i, prior_summary, system_prompt, history)
 
             src_preview = line[:30] + ('...' if len(line) > 30 else '')
             tgt_preview = translated[:30] + ('...' if len(translated) > 30 else '')
@@ -157,6 +215,10 @@ def _translate(config: Config, lines: list[str], system_prompt: str, total: int)
                 log.info('[번역] 시스템 프롬프트 업데이트 (요약 반영):\n%s', system_prompt)
                 history.trim_to_overlap()
 
-    blank_count = total - success_count - error_count
+    # 완료 시 state 파일 삭제
+    if os.path.exists(sp):
+        os.remove(sp)
+
+    blank_count = len(lines) - success_count - error_count
     log.info('[Phase 3] 번역 완료: 번역 %d / 빈줄 %d / 오류 %d / 전체 %d', success_count, blank_count, error_count, total)
     print(f'\n[번역 완료] 번역: {success_count}, 빈줄: {blank_count}, 오류: {error_count}, 전체: {total}')
