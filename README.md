@@ -9,6 +9,7 @@ LLM 기반 웹소설 처리 도구. 번역, epub 변환, 소실 데이터 복구
 | `translate` | 중국어 / 일본어 / 영어 원문을 한국어로 line-by-line 번역 |
 | `epub_to_txt` | epub 파일을 plain text로 변환 (후리가나 자동 제거) |
 | `recover` | 소실된 웹소설 구간을 앞뒤 문맥 기반으로 line-by-line 복구 |
+| `series_download` | 시리즈 페이지에서 다운로드 링크 수집 → dead link 제거 → aria2 다운로드 |
 
 **공통 특징:**
 - 나무위키 자동 크롤링으로 등장인물 프로필을 system prompt에 주입
@@ -27,8 +28,11 @@ cd noveltool
 uv venv --python 3.14
 source .venv/bin/activate
 uv pip install openai pyyaml tenacity requests beautifulsoup4 playwright tiktoken
+uv pip install cloudscraper aiohttp tqdm   # series_download 사용 시 필요
 playwright install chromium   # playwright 엔진 사용 시에만 필요
 ```
+
+aria2 설치 (series_download 다운로드 기능 사용 시): https://aria2.github.io/
 
 ## 설정
 
@@ -43,6 +47,11 @@ llm:
   base_url: "https://api.openai.com/v1"
   api_key: "${OPENAI_API_KEY}"   # 환경변수 또는 직접 입력
   model: "gpt-4o"                # 미설정 시 /models API 첫 번째 모델 자동 사용
+  # fallback:                    # primary 실패 시 자동 전환 (선택)
+  #   base_url: "https://generativelanguage.googleapis.com/v1beta/openai/"
+  #   api_key: "${GEMINI_API_KEY}"
+  #   model: "gemini-2.5-flash"
+  #   rpm_limit: 10              # 무료 플랜 기준
 ```
 
 전체 옵션은 [config.yaml.example](config.yaml.example) 참고.
@@ -76,13 +85,16 @@ python translate.py --config config.yaml
 # 파일 직접 지정 (config의 input/output 무시)
 python translate.py --input input/novel.txt --output output/novel_ko.txt --config config.yaml
 
-# 전처리 결과만 확인 (번역 없이 캐릭터/세계관 식별)
+# 원작 나무위키 문서명 직접 지정 (자동 추론 생략, 권장)
+python translate.py --config config.yaml --work "스트라이크 더 블러드"
+
+# 전처리 결과만 확인 (번역 없이 캐릭터 프로필 확인)
 python translate.py --config config.yaml --preprocess-only
 
-# 전처리 캐시 무시하고 재실행
+# 캐릭터 프로필 캐시 재구축 (프로필 변경 시 번역 자동 리셋)
 python translate.py --config config.yaml --no-cache
 
-# 테스트용: 앞 N줄만 번역 (config의 max_lines 무시)
+# 테스트용: 앞 N줄만 번역 (전처리는 항상 전문 사용)
 python translate.py --config config.yaml --max-lines 200
 
 # 설정 확인 (API 호출 없음)
@@ -90,12 +102,24 @@ python translate.py --config config.yaml --dry-run
 ```
 
 **번역 플로우:**
-1. 원문 전체를 청크로 분할해 등장인물 이름 병렬 추출
-2. LLM으로 원작 세계관 추론 → 나무위키 직접 검색으로 문서 후보 수집 + LLM 검증
-3. 검증된 작품의 나무위키 캐릭터 페이지에서 LLM으로 프로필 추출 (3단계 병렬)
-   - 캐릭터 프로필은 작품별 JSON으로 캐시 → 재실행 시 나무위키 fetch 생략
-4. line-by-line 번역, `history_window` 초과 시 롤링 요약으로 system prompt 갱신
-5. 매 줄마다 state(`{output}.state.json`) 저장 → 중단 후 재실행 시 history·요약문 완전 복원
+1. **원문 전체**를 청크로 분할해 등장인물 이름 병렬 추출 (저자명·조직명·한글 이름 제외)
+2. 원작 식별 — 우선순위 순:
+   - `--work` 직접 지정 → identify/verify 생략
+   - 기존 캐릭터 캐시와 대조해 매칭 작품 자동 선택
+   - 캐시 미매칭 시 나무위키 검색 + LLM 검증으로 폴백
+3. 나무위키 등장인물 페이지에서 캐릭터 프로필 추출 (병렬):
+   - 1단계: 원문 이름(seed) → 나무위키 한국어 이름 매핑 (원어 추측 없음)
+   - 2단계: seed에 없는 나머지 인물 추가 추출
+   - 개별 캐릭터 페이지: 작품 하위 경로 우선, 타 작품 동명 페이지 자동 거부
+   - 작품별 JSON 캐시 저장 → 재실행 시 나무위키 fetch 생략
+4. 현재 텍스트에 등장하는 인물만 필터링 → 중복 제거 → 유의미한 desc만 system prompt 주입
+5. line-by-line 번역, `history_window` 초과 시 롤링 요약으로 system prompt 갱신
+6. 매 줄마다 state(`{output}.state.json`) 저장 → 중단 후 재실행 시 history·요약문 완전 복원
+
+**`--no-cache` 동작:**
+캐시 재구축 후 새 프로필과 기존 state의 프로필을 비교한다.
+- 동일하면 이어쓰기 유지
+- 변경됐으면 출력 파일·state 파일 삭제 후 1줄부터 재번역
 
 **병렬 배치 실행:**
 
@@ -155,6 +179,30 @@ log_level: "INFO"            # DEBUG | INFO | WARNING | ERROR
 log_translation_step: 100    # INFO 로그 주기 (N줄마다 진행률 기록, 오류는 항상 기록)
 ```
 
+### 시리즈 다운로드
+
+```bash
+# 기본 실행 (링크 수집 + dead link 제거 + aria2 다운로드)
+python series_download.py --url https://example.com/series
+
+# 특정 호스트/확장자만 필터
+python series_download.py --url URL --hosts mega pixeldrain --ext .epub .pdf
+
+# 링크 수집만 (다운로드 생략)
+python series_download.py --url URL --no-download --output links.json
+
+# dead link 검사 생략
+python series_download.py --url URL --no-validate
+
+# 다운로드 폴더 지정
+python series_download.py --url URL --out-dir ./downloads
+```
+
+- cloudscraper로 Cloudflare 보호 우회
+- aiohttp 병렬 HEAD 요청으로 dead link 제거
+- aria2c `-x16 -s16`으로 고속 다운로드
+- 수집된 링크는 `downloads.json`에 저장
+
 ## 프로젝트 구조
 
 ```
@@ -162,6 +210,7 @@ noveltool/
 ├── translate.py               # 번역 CLI
 ├── recover.py                 # 복구 CLI
 ├── epub_to_txt.py             # epub → txt 변환 CLI
+├── series_download.py         # 시리즈 다운로드 CLI
 ├── translate_parallel.sh      # 병렬 배치 번역 (최대 10개 동시)
 ├── translate_batch.sh         # 순차 배치 번역
 ├── watch_progress.sh          # 진행 상황 모니터링 (watch -n 1 bash watch_progress.sh)
@@ -176,6 +225,7 @@ noveltool/
     ├── prompt.py              # system prompt 빌더
     ├── pipeline.py            # 번역 파이프라인 (state 저장/이어쓰기 포함)
     ├── recover_pipeline.py    # 복구 파이프라인
+    ├── series_downloader.py   # 시리즈 다운로드 모듈
     └── preprocessor/
         ├── extractor.py       # tiktoken 청크 분할 + 병렬 캐릭터 추출
         ├── identifier.py      # LLM 원작 세계관 추론
@@ -188,3 +238,4 @@ noveltool/
 | 변수 | 설명 |
 |------|------|
 | `OPENAI_API_KEY` | OpenAI API 키 (또는 호환 서버 키) |
+| `GEMINI_API_KEY` | Google AI Studio 키 — fallback LLM 사용 시 필요 |

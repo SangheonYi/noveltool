@@ -17,12 +17,21 @@ def _expand_env(value):
 
 
 @dataclass
+class FallbackLLMConfig:
+    base_url: str
+    api_key: str
+    model: str
+    rpm_limit: int
+
+
+@dataclass
 class LLMConfig:
     base_url: str
     api_key: str
     model: str
     temperature: float
     max_completion_tokens: int
+    fallback: FallbackLLMConfig | None = None
 
 
 @dataclass
@@ -54,6 +63,13 @@ class RecoveryConfig:
 
 
 @dataclass
+class ReviewConfig:
+    enabled: bool
+    batch_size: int       # 검수할 원문-번역 쌍 수
+    max_retranslate: int  # 재번역 최대 횟수 (초과 시 그냥 진행)
+
+
+@dataclass
 class SystemPromptConfig:
     base: str
     extra_rules: list[str]
@@ -64,6 +80,7 @@ class Config:
     llm: LLMConfig
     translation: TranslationConfig
     recovery: RecoveryConfig
+    review: ReviewConfig
     preprocessing: PreprocessingConfig
     search: SearchConfig
     system_prompt: SystemPromptConfig
@@ -72,6 +89,7 @@ class Config:
     log_dir: str
     log_level: str
     log_translation_step: int
+    work: str | None  # 나무위키 작품 문서명 직접 지정 시 identify/verify 생략
 
 
 def _resolve_log_dir(log_dir: str | None, output: str) -> str:
@@ -124,6 +142,18 @@ def load_config(path: str) -> Config:
     search_raw = raw.get('search', {})
     system_prompt_raw = raw.get('system_prompt', {})
 
+    fallback_raw = llm_raw.get('fallback')
+    fallback_cfg: FallbackLLMConfig | None = None
+    if fallback_raw and fallback_raw.get('base_url') and fallback_raw.get('api_key'):
+        fb_model = fallback_raw.get('model', 'gemini-2.5-flash')
+        fallback_cfg = FallbackLLMConfig(
+            base_url=fallback_raw['base_url'],
+            api_key=fallback_raw['api_key'],
+            model=fb_model,
+            rpm_limit=int(fallback_raw.get('rpm_limit', 10)),
+        )
+        print(f'[설정] fallback LLM: {fb_model} ({fallback_raw["base_url"]})')
+
     return Config(
         llm=LLMConfig(
             base_url=llm_raw['base_url'],
@@ -131,6 +161,7 @@ def load_config(path: str) -> Config:
             model=model,
             temperature=float(llm_raw.get('temperature', 0.3)),
             max_completion_tokens=int(llm_raw.get('max_completion_tokens', 4096)),
+            fallback=fallback_cfg,
         ),
         translation=TranslationConfig(
             history_window=int(translation_raw.get('history_window', 20)),
@@ -142,6 +173,11 @@ def load_config(path: str) -> Config:
         recovery=RecoveryConfig(
             before_lines=int(recovery_raw.get('before_lines', 20)),
             after_lines=int(recovery_raw.get('after_lines', 10)),
+        ),
+        review=ReviewConfig(
+            enabled=bool(raw.get('review', {}).get('enabled', False)),
+            batch_size=int(raw.get('review', {}).get('batch_size', 30)),
+            max_retranslate=int(raw.get('review', {}).get('max_retranslate', 2)),
         ),
         preprocessing=PreprocessingConfig(
             chunk_tokens=int(preprocessing_raw.get('chunk_tokens', 6000)),
@@ -161,4 +197,5 @@ def load_config(path: str) -> Config:
         log_dir=_resolve_log_dir(raw.get('log_dir'), raw.get('output', '')),
         log_level=str(raw.get('log_level', 'INFO')).upper(),
         log_translation_step=int(raw.get('log_translation_step', 100)),
+        work=raw.get('work') or None,
     )

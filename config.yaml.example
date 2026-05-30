@@ -4,6 +4,11 @@ llm:
   model: "gpt-4o"                     # 미설정 시 /models API 첫 번째 모델 자동 사용
   temperature: 0.3
   max_completion_tokens: 4096
+  # fallback:                         # primary 실패 시 자동 전환할 fallback LLM (선택)
+  #   base_url: "https://generativelanguage.googleapis.com/v1beta/openai/"
+  #   api_key: "${GEMINI_API_KEY}"    # Google AI Studio 발급 키
+  #   model: "gemini-2.5-flash"
+  #   rpm_limit: 10                   # 무료 플랜 기준 (유료 시 상향 가능)
 
 translation:
   history_window: 20                  # 번역 history로 유지할 최대 턴 수
@@ -17,6 +22,13 @@ translation:
 recovery:
   before_lines: 20                    # 소실 전 컨텍스트로 사용할 최대 라인 수 (history로 주입)
   after_lines: 10                     # 소실 후 forward reference로 사용할 최대 라인 수 (system prompt 참조 블록)
+
+review:
+  enabled: false                      # 번역 검수 활성화 여부
+  batch_size: 30                      # 한 번에 검수할 원문-번역 쌍 수
+                                      # 검수는 번역과 병렬 실행: 배치 N 검수 중 배치 N+1 선번역
+                                      # 검수 실패 시: 선번역 버림 → 피드백 반영 재번역 → 이후 재개
+  max_retranslate: 2                  # 재번역 최대 횟수 (초과 시 마지막 재번역 결과로 진행)
 
 preprocessing:
   chunk_tokens: 6000                  # 캐릭터 추출 청크 최대 토큰 수 (tiktoken 기준)
@@ -60,6 +72,10 @@ system_prompt:
 
 input: "input/novel.txt"              # 번역 태스크 입력 파일 (CLI --input 으로 override 가능)
 output: "output/novel_ko.txt"         # 번역 태스크 출력 파일 (CLI --output 으로 override 가능)
+
+# work: "스트라이크 더 블러드"           # 나무위키 작품 문서명 직접 지정 (미설정 시 자동 추론)
+                                      # 설정 시 identify/verify 단계 생략 → 해당 작품 캐릭터 바로 사용
+                                      # CLI: python translate.py --work "스트라이크 더 블러드"
 
 # 로그 설정
 # log_dir: "output/logs"              # 로그 파일 저장 디렉터리 (기본값: 출력 파일과 같은 폴더의 logs/)
