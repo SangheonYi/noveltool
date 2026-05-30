@@ -31,6 +31,7 @@ config.yaml
 
 # Project runtime artifacts
 .cache/
+parody_cache/
 input/
 output/
 logs/

@@ -7,6 +7,27 @@ _SUMMARY_HEADER = '[이야기 요약]'
 _AFTER_HEADER = '[후속 문맥 참고]'
 _RECOVERY_HEADER = '[복구 태스크 안내]'
 
+# desc에 이 문자열이 포함되면 실질적 정보가 없는 것으로 판단
+_USELESS_DESC_PATTERNS = (
+    '이름만 언급',
+    '이름 목록만',
+    '정보가 포함되어 있지 않',
+    '프로필을 추출할 수 없',
+    '상세 정보가 부족',
+    '상세 프로필 정보가 없',
+    '텍스트에는 이름 목록만',
+    '구체적인 성격이나 능력 등의 상세 정보는 나타나 있지 않',
+    '캐릭터 정보가 아닌',
+    '이름 외의 상세 프로필',
+)
+
+
+def _useful_desc(desc: str) -> str:
+    """유의미하지 않은 desc는 빈 문자열로 대체."""
+    if not desc:
+        return ''
+    return '' if any(p in desc for p in _USELESS_DESC_PATTERNS) else desc
+
 
 def _build_character_section(characters: list[CharacterProfile]) -> str | None:
     if not characters:
@@ -21,8 +42,9 @@ def _build_character_section(characters: list[CharacterProfile]) -> str | None:
             lines.append(f'\n# {work}')
         for c in chars:
             entry = f'- {c.original} ({c.korean})'
-            if c.desc:
-                entry += f': {c.desc}'
+            desc = _useful_desc(c.desc)
+            if desc:
+                entry += f': {desc}'
             lines.append(entry)
     return '\n'.join(lines)
 

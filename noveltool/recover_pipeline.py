@@ -4,7 +4,7 @@ from .config import Config
 from .llm_client import LLMClient
 from .preprocessor.extractor import extract_characters
 from .preprocessor.identifier import identify_works
-from .preprocessor.namuwiki import CharacterProfile, fetch_characters
+from .preprocessor.namuwiki import CharacterProfile, fetch_characters, filter_by_raw_chars
 from .preprocessor.verifier import verify_works
 from .prompt import build_recovery_system_prompt
 
@@ -55,34 +55,47 @@ def _read_lines(path: str) -> list[str]:
 def _preprocess(config: Config, lines: list[str]) -> list[CharacterProfile]:
     llm_client = LLMClient(config)
 
-    raw_chars = extract_characters(llm_client, lines, config.preprocessing.chunk_tokens, config.llm.model)
+    raw_chars: dict[str, str] = extract_characters(llm_client, lines, config.preprocessing.chunk_tokens, config.llm.model)
     if not raw_chars:
         print('[전처리] 추출된 캐릭터 없음 — 캐릭터 없이 진행')
         return []
 
-    candidates = identify_works(llm_client, raw_chars)
-    if not candidates:
-        print('[전처리] 원작 추론 결과 없음 — 캐릭터 없이 진행')
-        return []
+    if config.work:
+        article_names = [config.work]
+        print(f'[전처리] 원작 직접 지정: {config.work}')
+    else:
+        candidates = identify_works(llm_client, raw_chars)
+        if not candidates:
+            print('[전처리] 원작 추론 결과 없음 — 캐릭터 없이 진행')
+            return []
 
-    verified = verify_works(
-        llm_client,
-        candidates,
-        engine=config.search.engine,
-        headless=config.search.headless,
-        result_count=config.search.result_count,
-        debug_dir=config.preprocessing.cache_dir,
-    )
-    if not verified:
-        print('[전처리] 검증된 원작 없음 — 캐릭터 없이 진행')
-        return []
+        verified = verify_works(
+            llm_client,
+            candidates,
+            engine=config.search.engine,
+            headless=config.search.headless,
+            result_count=config.search.result_count,
+            debug_dir=config.preprocessing.cache_dir,
+        )
+        if not verified:
+            print('[전처리] 검증된 원작 없음 — 캐릭터 없이 진행')
+            return []
 
+        article_names = [w.namuwiki_article for w in verified]
+
+    original_seeds = [
+        {'name': n, 'reading': r}
+        for n, r in raw_chars.items()
+        if not any('가' <= c <= '힣' for c in n)
+    ]
     all_characters: list[CharacterProfile] = []
-    for work in verified:
-        chars = fetch_characters(work.namuwiki_article, config.preprocessing.cache_dir, llm_client)
+    for article in article_names:
+        chars = fetch_characters(article, config.preprocessing.cache_dir, llm_client, seed_names=original_seeds)
         all_characters.extend(chars)
 
-    return all_characters
+    filtered = filter_by_raw_chars(all_characters, set(raw_chars.keys()))
+    print(f'[전처리] 완료: 전체 {len(all_characters)}명 → 현재 텍스트 등장 {len(filtered)}명')
+    return filtered
 
 
 def _recover(

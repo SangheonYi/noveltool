@@ -4,6 +4,14 @@ class HistoryManager:
         self._overlap = overlap
         self._pairs: list[tuple[str, str]] = []
 
+    def snapshot(self) -> list[tuple[str, str]]:
+        """현재 history 상태의 복사본 반환."""
+        return list(self._pairs)
+
+    def restore(self, snapshot: list[tuple[str, str]]) -> None:
+        """snapshot()으로 저장한 상태로 복원."""
+        self._pairs = list(snapshot)
+
     def add_turn(self, user_line: str, assistant_line: str) -> None:
         self._pairs.append((user_line, assistant_line))
 

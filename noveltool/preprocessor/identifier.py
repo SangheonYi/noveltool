@@ -1,35 +1,32 @@
-import json
+"""
+identifier.py — 원작 세계관 식별
+
+각 캐릭터명을 나무위키에서 검색하여 등장 작품을 빈도 기반으로 집계한다.
+LLM 추론 대신 실제 검색 결과를 사용하므로 신뢰도가 높다.
+"""
+from __future__ import annotations
+
+import collections
+import re
+import time
 from dataclasses import dataclass
+from urllib.parse import quote_plus, unquote
+
+import requests
+from bs4 import BeautifulSoup
 
 from .. import logger
 
-_PROMPT_TEMPLATE = (
-    '아래 등장인물 이름들을 보고, 이들이 등장하는 원작 작품(만화, 소설, 게임, 영화, 드라마 등)을 추론해 주세요.\n'
-    '크로스오버/패러디일 경우 여러 작품을 포함하세요.\n'
-    '확신하기 어려운 인물은 포함하지 말고 확실한 작품만 응답하세요.\n'
-    'JSON으로만 응답하세요.\n\n'
-    '등장인물: {characters}\n\n'
-    '응답 형식:\n'
-    '[\n'
-    '  {{\n'
-    '    "work": "작품명",\n'
-    '    "characters": ["해당 작품 소속으로 추정되는 인물 이름들"],\n'
-    '    "confidence": 0.0~1.0,\n'
-    '    "reason": "추론 근거"\n'
-    '  }}\n'
-    ']'
-)
 
-# 실제 작품이 아닌 catch-all 분류를 나타내는 패턴 (소문자 매칭)
-_CATCH_ALL_PATTERNS = {
-    'unknown', 'other', 'miscellaneous', 'misc',
-    '기타', '단역', '미상', '불명', '엑스트라',
-}
+# 나무위키 URL에서 제외할 프리픽스·서픽스
+_SKIP_PREFIXES = ('틀:', '분류:', '템플릿:', '파일:', '분류:파일/')
+_SKIP_SUFFIXES = ('채널', '갤러리', '마이너 갤러리', '관련 정보')
 
+# 등장인물 페이지 URL 패턴: /w/{작품}/등장인물/...  또는  /w/{작품}/등장인물
+_CHAR_PATH_RE = re.compile(r'^(.+?)(?:/등장인물(?:/.+)?|/캐릭터(?:/.+)?)$')
 
-def _is_catch_all(work: str) -> bool:
-    w = work.lower()
-    return any(p in w for p in _CATCH_ALL_PATTERNS)
+# catch-all 필터
+_CATCH_ALL = {'unknown', 'other', 'misc', '기타', '단역', '미상', '불명', '엑스트라'}
 
 
 @dataclass
@@ -40,53 +37,98 @@ class WorkCandidate:
     reason: str
 
 
+def _search_character(name: str) -> list[str]:
+    """캐릭터명을 나무위키에서 검색 → 등장 작품 목록 반환."""
+    log = logger.get()
+    works: list[str] = []
+    try:
+        url = f'https://namu.wiki/Search?q={quote_plus(name)}'
+        headers = {
+            'User-Agent': (
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                'AppleWebKit/537.36 (KHTML, like Gecko) '
+                'Chrome/124.0.0.0 Safari/537.36'
+            ),
+            'Accept-Language': 'ko-KR,ko;q=0.9',
+        }
+        resp = requests.get(url, headers=headers, timeout=10)
+        if resp.status_code != 200:
+            return works
+        soup = BeautifulSoup(resp.text, 'html.parser')
+        for a in soup.find_all('a', href=True):
+            href = a['href']
+            if not href.startswith('/w/'):
+                continue
+            title = unquote(href[3:]).replace('+', ' ')
+            if any(title.startswith(p) for p in _SKIP_PREFIXES):
+                continue
+            if any(title.endswith(s) for s in _SKIP_SUFFIXES):
+                continue
+            # /w/{작품}/등장인물/... 형태 → 작품명 추출
+            m = _CHAR_PATH_RE.match(title)
+            if m:
+                work = m.group(1).strip()
+                if work and work not in works:
+                    works.append(work)
+            # /w/{작품} 형태이면서 제목에 작품명이 포함될 수 있음 — 그대로 후보
+            elif '/' not in title and title not in works:
+                works.append(title)
+    except Exception as e:
+        log.debug('[식별] 나무위키 검색 실패 (%s): %s', name, e)
+    return works
+
+
 def identify_works(llm_client, characters: set[str]) -> list[WorkCandidate]:
+    """
+    캐릭터명 각각을 나무위키에서 검색하여 등장 빈도가 높은 작품을 반환한다.
+    llm_client 는 시그니처 호환성 유지용 (사용 안 함).
+    """
     log = logger.get()
     if not characters:
         return []
 
-    character_list = ', '.join(sorted(characters))
-    messages = [{'role': 'user', 'content': _PROMPT_TEMPLATE.format(characters=character_list)}]
-    log.info('[세계관] 프롬프트 템플릿:\n%s', _PROMPT_TEMPLATE.replace('{characters}', '... (캐릭터 목록)'))
-    log.debug('[세계관] 입력 캐릭터 목록: %s', character_list)
+    work_count: dict[str, int] = collections.Counter()
+    work_chars: dict[str, list[str]] = collections.defaultdict(list)
 
-    try:
-        response = llm_client.chat(messages, temperature=0)
-        log.debug('[세계관] LLM 응답:\n%s', response)
-        start = response.find('[')
-        end = response.rfind(']') + 1
-        if start == -1 or end == 0:
-            log.warning('[세계관] JSON 파싱 실패 (응답에 배열 없음)')
-            return []
-        data = json.loads(response[start:end])
+    char_list = sorted(characters)
+    log.info('[식별] 캐릭터 %d명 나무위키 검색 시작', len(char_list))
+    print(f'[전처리] 캐릭터 {len(char_list)}명 나무위키 검색 중...')
 
-        candidates = []
-        skipped = []
-        for item in data:
-            work = item.get('work', '')
-            if not work:
-                continue
-            if _is_catch_all(work):
-                skipped.append(work)
-                continue
-            candidates.append(WorkCandidate(
-                work=work,
-                characters=item.get('characters', []),
-                confidence=float(item.get('confidence', 0.0)),
-                reason=item.get('reason', ''),
-            ))
+    for i, name in enumerate(char_list):
+        works = _search_character(name)
+        for w in works:
+            work_count[w] += 1
+            if name not in work_chars[w]:
+                work_chars[w].append(name)
+        if (i + 1) % 10 == 0:
+            print(f'  {i + 1}/{len(char_list)} 검색 완료...', flush=True)
+        time.sleep(0.1)  # 나무위키 부하 방지
 
-        if skipped:
-            log.info('[세계관] catch-all 후보 필터링: %s', skipped)
-
-        log.info('[세계관] 원작 후보 %d개 (필터 후):', len(candidates))
-        for c in candidates:
-            log.info('  - %s (confidence=%.2f): %s', c.work, c.confidence, c.reason)
-            log.info('    캐릭터: %s', c.characters)
-
-        print(f'[전처리] 원작 후보: {[c.work for c in candidates]}')
-        return candidates
-    except Exception as e:
-        log.error('[세계관] 추론 실패: %s', e)
-        print(f'[경고] 세계관 추론 실패: {e}')
+    if not work_count:
+        log.warning('[식별] 어떤 작품도 검색되지 않음')
+        print('[전처리] 나무위키 검색에서 작품 미발견')
         return []
+
+    # 빈도 상위 작품 → 후보 목록 (최소 2개 캐릭터가 검색된 작품만)
+    MIN_CHARS = max(1, len(char_list) // 20)  # 전체의 5% 이상 등장
+    top = [
+        (work, cnt) for work, cnt in work_count.most_common(10)
+        if cnt >= MIN_CHARS
+        and not any(p in work.lower() for p in _CATCH_ALL)
+    ]
+
+    log.info('[식별] 작품 빈도 상위:\n%s',
+             '\n'.join(f'  {w}: {c}명' for w, c in work_count.most_common(10)))
+    log.info('[식별] 최종 후보 (최소 %d명): %s', MIN_CHARS, [w for w, _ in top])
+    print(f'[전처리] 원작 후보: {[w for w, _ in top]} (기준: {MIN_CHARS}명 이상 검색됨)')
+
+    candidates = [
+        WorkCandidate(
+            work=work,
+            characters=work_chars[work],
+            confidence=min(1.0, cnt / len(char_list)),
+            reason=f'나무위키 검색에서 {cnt}명 등장 확인',
+        )
+        for work, cnt in top
+    ]
+    return candidates
